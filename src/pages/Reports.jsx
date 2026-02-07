@@ -1,11 +1,10 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../supabaseClient'
-import { Download, PieChart, Users, DollarSign, AlertTriangle } from 'lucide-react'
+import { Download, Users, DollarSign, AlertTriangle, Home } from 'lucide-react'
 
 export default function Reports() {
   const [payments, setPayments] = useState([])
-  const [tenants, setTenants] = useState([])
-  const [units, setUnits] = useState([])
+  const [processedTenants, setProcessedTenants] = useState([]) // Stores tenants with calculated arrears
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -15,16 +14,66 @@ export default function Reports() {
   const fetchAllData = async () => {
     try {
       setLoading(true)
-      const [payRes, tenRes, unitsRes] = await Promise.all([
-        supabase.from('payments').select('amount, payment_date'),
-        supabase.from('tenants').select('name, balance, units(unit_number)'),
-        supabase.from('units').select('status, rent_amount')
-      ])
+      
+      // 1. Get Logged In User
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error("User not authenticated")
 
-      if (payRes.data) setPayments(payRes.data || [])
-      if (tenRes.data) setTenants(tenRes.data || [])
-      if (unitsRes.data) setUnits(unitsRes.data || [])
+      // 2. Fetch Tenants linked to User's Properties (Isolation)
+      // We fetch tenants, their units, and the property ownership to ensure isolation
+      const { data: tenants, error: tenantError } = await supabase
+        .from('tenants')
+        .select(`
+          id, 
+          name, 
+          created_at,
+          units!inner (
+            rent_amount, 
+            unit_number,
+            properties!inner ( user_id )
+          )
+        `)
+        .eq('units.properties.user_id', user.id) // <--- ISOLATION
+
+      if (tenantError) throw tenantError
+
+      // 3. Fetch Payments for these specific tenants
+      const tenantIds = tenants.map(t => t.id)
+      let paymentsData = []
+      
+      if (tenantIds.length > 0) {
+        const { data: p } = await supabase
+          .from('payments')
+          .select('amount, payment_date, tenant_id')
+          .in('tenant_id', tenantIds)
+        
+        paymentsData = p || []
+      }
+
+      setPayments(paymentsData)
+
+      // 4. CALCULATE ARREARS & PROCESS DATA
+      // Logic: Arrears = (House Rent) - (Total Paid)
+      const processed = tenants.map(t => {
+        const rent = t.units.rent_amount || 0
+        const totalPaid = paymentsData
+          .filter(p => p.tenant_id === t.id)
+          .reduce((sum, p) => sum + (p.amount || 0), 0)
+        
+        const arrears = rent - totalPaid
+
+        return {
+          ...t,
+          rent,
+          totalPaid,
+          arrears
+        }
+      })
+
+      setProcessedTenants(processed)
+
     } catch (error) {
+      console.error(error)
       alert('Error generating reports: ' + error.message)
     } finally {
       setLoading(false)
@@ -33,10 +82,12 @@ export default function Reports() {
 
   // --- ANALYTICS CALCULATIONS ---
   const totalIncome = payments.reduce((sum, p) => sum + (p.amount || 0), 0)
-  const totalArrears = tenants.reduce((sum, t) => sum + (t.balance || 0), 0)
-  const totalUnitsCount = units.length
-  const occupiedCount = units.filter(u => u.status === 'occupied').length
-  const occupancyRate = totalUnitsCount > 0 ? Math.round((occupiedCount / totalUnitsCount) * 100) : 0
+  
+  // Sum of all positive arrears (Money Owed)
+  const totalArrears = processedTenants
+    .reduce((sum, t) => sum + (t.arrears > 0 ? t.arrears : 0), 0)
+
+  // Note: To get a real occupancy rate (Vacant vs Occupied), we would need to fetch ALL units, not just those with tenants.
 
   // Monthly Report Data
   const monthlyReport = payments.reduce((acc, curr) => {
@@ -92,16 +143,19 @@ export default function Reports() {
             </div>
 
             <div className="stat-card gold-accent">
-              <div className="stat-label"><Users size={14} style={{display:'inline', marginRight:'4px'}}/> Occupancy Rate</div>
-              <div className="stat-value">{occupancyRate}%</div>
+              <div className="stat-label"><Users size={14} style={{display:'inline', marginRight:'4px'}}/> Active Tenants</div>
+              <div className="stat-value">{processedTenants.length}</div>
               <div style={{fontSize:'0.8rem', color:'#666', marginTop:'4px'}}>
-                {occupiedCount} / {totalUnitsCount} Units
+                Currently Occupied Units
               </div>
             </div>
 
             <div className="stat-card danger">
-              <div className="stat-label"><AlertTriangle size={14} style={{display:'inline', marginRight:'4px'}}/> Outstanding Arrears</div>
+              <div className="stat-label"><AlertTriangle size={14} style={{display:'inline', marginRight:'4px'}}/> Total Arrears</div>
               <div className="stat-value" style={{color:'#ef4444'}}>KES {totalArrears.toLocaleString()}</div>
+              <div style={{fontSize:'0.8rem', color:'#666', marginTop:'4px'}}>
+                Rent - Paid
+              </div>
             </div>
           </div>
 
@@ -124,13 +178,15 @@ export default function Reports() {
                   </tr>
                 </thead>
                 <tbody>
-                  {monthlyTableData.map((row, idx) => (
+                  {monthlyTableData.length > 0 ? monthlyTableData.map((row, idx) => (
                     <tr key={idx}>
                       <td style={{fontWeight:600}}>{row.Month}</td>
                       <td>{row.Transactions}</td>
                       <td style={{color:'var(--primary-green)', fontWeight:'700'}}>KES {row.Amount.toLocaleString()}</td>
                     </tr>
-                  ))}
+                  )) : (
+                    <tr><td colSpan="3" style={{textAlign:'center', color:'#666'}}>No records found</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -139,11 +195,16 @@ export default function Reports() {
           {/* --- SECTION 3: ARREARS REPORT --- */}
           <div className="stat-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h4>Top Debtors (Arrears Report)</h4>
+              <h4>Rent Arrears Report</h4>
               <button className="btn btn-outline btn-sm" onClick={() => {
-                 const debtors = tenants
-                    .filter(t => t.balance > 0)
-                    .map(t => ({ Name: t.name, Unit: t.units?.unit_number || 'N/A', Arrears: t.balance }))
+                 const debtors = processedTenants
+                    .map(t => ({ 
+                      Name: t.name, 
+                      Unit: t.units?.unit_number || 'N/A', 
+                      Rent: t.rent,
+                      Paid: t.totalPaid,
+                      Arrears: t.arrears > 0 ? t.arrears : 0 
+                    }))
                  downloadCSV(debtors, 'keja_zetu_arrears_report.csv')
               }}>
                 <Download size={14} /> Export CSV
@@ -156,17 +217,30 @@ export default function Reports() {
                   <tr>
                     <th>Tenant</th>
                     <th>Unit</th>
-                    <th>Arrears Balance</th>
+                    <th>House Rent</th>
+                    <th>Total Paid</th>
+                    <th>Arrears (Balance)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {tenants.filter(t => t.balance > 0).sort((a,b) => b.balance - a.balance).map((t) => (
+                  {processedTenants.length > 0 ? processedTenants.map((t) => (
                     <tr key={t.id}>
-                      <td>{t.name}</td>
+                      <td>
+                        <strong>{t.name}</strong>
+                      </td>
                       <td>{t.units?.unit_number}</td>
-                      <td style={{color:'#ef4444', fontWeight:'700'}}>KES {t.balance.toLocaleString()}</td>
+                      <td>KES {t.rent.toLocaleString()}</td>
+                      <td style={{color: 'var(--primary-green)'}}>KES {t.totalPaid.toLocaleString()}</td>
+                      <td style={{
+                        color: t.arrears > 0 ? '#ef4444' : '#2ECC71', 
+                        fontWeight:'700'
+                      }}>
+                        {t.arrears > 0 ? `KES ${t.arrears.toLocaleString()}` : `KES 0 (Credit: ${Math.abs(t.arrears).toLocaleString()})`}
+                      </td>
                     </tr>
-                  ))}
+                  )) : (
+                     <tr><td colSpan="5" style={{textAlign:'center', color:'#666'}}>No tenant data</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>

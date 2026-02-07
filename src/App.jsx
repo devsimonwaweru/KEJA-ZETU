@@ -2,8 +2,13 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { supabase } from './supabaseClient'
+
+// Pages
 import Login from './pages/Login'
-import Layout from './components/Layout'
+import SignUp from './pages/SignUp'
+import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
+import ProfileSetup from './pages/ProfileSetup'
 import Dashboard from './pages/Dashboard'
 import Properties from './pages/Properties'
 import Units from './pages/Units'
@@ -11,8 +16,12 @@ import Tenants from './pages/Tenants'
 import Payments from './pages/Payments'
 import Maintenance from './pages/Maintenance'
 import Reports from './pages/Reports'
-import Settings from './pages/Settings' // <--- Import this
+import Settings from './pages/Settings'
 
+// Layout wrapper
+import Layout from './components/Layout'
+
+// Protected route wrapper
 const ProtectedRoute = ({ session }) => {
   if (!session) return <Navigate to="/login" replace />
   return <Outlet />
@@ -20,18 +29,37 @@ const ProtectedRoute = ({ session }) => {
 
 function App() {
   const [session, setSession] = useState(null)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setSession(session))
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => setSession(session))
+    // Get current session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session)
+      setLoading(false)
+    })
+
+    // Listen to auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session)
+    })
+
     return () => subscription.unsubscribe()
   }, [])
+
+  // Show nothing while checking session
+  if (loading) return null
 
   return (
     <BrowserRouter>
       <Routes>
+        {/* Public routes */}
         <Route path="/login" element={<Login />} />
-        
+        <Route path="/signup" element={<SignUp />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+        <Route path="/setup-profile" element={<ProfileSetup />} />
+
+        {/* Protected routes */}
         <Route element={<ProtectedRoute session={session} />}>
           <Route path="/" element={<Layout />}>
             <Route index element={<Dashboard />} />
@@ -41,10 +69,15 @@ function App() {
             <Route path="payments" element={<Payments />} />
             <Route path="maintenance" element={<Maintenance />} />
             <Route path="reports" element={<Reports />} />
-            {/* --- ADD THIS ROUTE --- */}
             <Route path="settings" element={<Settings />} />
           </Route>
         </Route>
+
+        {/* Catch-all for undefined routes */}
+        <Route
+          path="*"
+          element={<Navigate to={session ? "/" : "/login"} replace />}
+        />
       </Routes>
     </BrowserRouter>
   )

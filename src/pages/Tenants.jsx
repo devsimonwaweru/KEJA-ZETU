@@ -13,20 +13,31 @@ export default function Tenants() {
     try {
       setLoading(true)
       
-      // FIXED QUERY:
-      // 1. Moved 'payments' out of 'units' to be a sibling, matching your database schema (payments -> tenants).
-      // 2. Added 'rent_amount' to the 'units' selection so the balance calculation works correctly.
+      // 1. GET THE LOGGED IN USER
+      const { data: { user }, error: userError } = await supabase.auth.getUser()
+      if (userError) throw userError
+      if (!user) {
+        setTenants([])
+        setLoading(false)
+        return
+      }
+
+      // 2. FETCH TENANTS FILTERED BY USER ID
+      // We traverse the relationship: tenants -> units -> properties -> user_id
+      // We use !inner on units and properties to ensure we only get tenants that 
+      // successfully link back to a property owned by this user.
       const { data, error } = await supabase
         .from('tenants')
         .select(`
           *,
-          units (
+          units!inner (
             unit_number,
             rent_amount,
-            properties ( name )
+            properties!inner ( name, user_id ) 
           ),
           payments ( amount )
         `)
+        .eq('units.properties.user_id', user.id) // <--- ISOLATION: Filter by the logged-in user's ID
         .order('created_at', { ascending: false })
 
       if (error) throw error
@@ -72,7 +83,6 @@ export default function Tenants() {
           <table>
             <thead>
               <tr>
-                {/* Updated headers to match the 3-column body structure */}
                 <th>Name & Phone</th>
                 <th>Unit / Property</th>
                 <th>Balance (Arrears)</th>
@@ -94,11 +104,6 @@ export default function Tenants() {
                   </td>
 
                   <td>
-                    {/* 
-                      Color Logic: 
-                      If balance > 0 (Credit), use Green (#2ECC71).
-                      If balance < 0 (Arrears), use Red (#ef4444).
-                    */}
                     <span style={{ 
                       color: t.balance >= 0 ? '#2ECC71' : '#ef4444', 
                       fontWeight: '700' 
